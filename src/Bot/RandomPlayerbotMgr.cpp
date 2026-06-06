@@ -4,7 +4,7 @@
  */
 
 #include "RandomPlayerbotMgr.h"
-
+#include "../../addons/DormantBotMgr.h"
 #include <WorldSessionMgr.h>
 
 #include <algorithm>
@@ -279,8 +279,10 @@ void RandomPlayerbotMgr::LogPlayerLocation()
     }
 }
 
-void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
+void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool /*minimal*/)//原版elapsed作为隐性参数传入，为了休眠能调入参数，需要将形参显性的表示出来
 {
+	// 随着 RandomPlayerbotMgr 的全局单例心跳，每隔一个周期利落地执行一次全服 5x5 视距扫描
+	sDormantBotMgr->Update(elapsed);
     if (totalPmo)
         totalPmo->finish();
 
