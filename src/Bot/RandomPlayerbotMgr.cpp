@@ -4,7 +4,7 @@
  */
 
 #include "RandomPlayerbotMgr.h"
-#include "../../addons/DormantBotMgr.h"
+#include "DormantBotMgr.h"   //加入休眠功能，RandomPlayerbotMgr::UpdateAIInternal函数也进行了修改
 #include <WorldSessionMgr.h>
 
 #include <algorithm>
