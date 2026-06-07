@@ -57,6 +57,8 @@
 #include "Unit.h"
 #include "UpdateTime.h"
 #include "Vehicle.h"
+#include "DormantBotMgr.h"
+
 
 constexpr uint32 SPELL_TITAN_GRIP = 49152;
 constexpr uint32 SPELL_DK_FROST_PRESENCE = 48263;
@@ -594,7 +596,14 @@ void PlayerbotAI::HandleCommands()
 
 std::map<std::string, ChatMsg> chatMap;
 void PlayerbotAI::HandleCommand(uint32 type, const std::string& text, Player& fromPlayer, const uint32 lang)
-{
+{	
+	// === 【此处注入唤醒补丁】（冗余保留代码） ===
+    // 强制检查：如果机器人处于休眠中，立刻唤醒他，然后再处理指令！
+    if (sDormantBotMgr->IsDormant(bot->GetGUID()))
+    {
+        sDormantBotMgr->ForceWakeUp(bot);
+    }
+    // ===========================
     if (!bot)
         return;
 
@@ -1116,7 +1125,27 @@ void PlayerbotAI::HandleBotOutgoingPacket(WorldPacket const& packet)
 {
     if (packet.empty())
         return;
-
+	// 核心原因：假人在停尸房时(IsInWorld=false)，如果不在这里拦截，所有密语和邀请包都会被瞬间丢弃！
+    if (packet.GetOpcode() == SMSG_MESSAGECHAT || packet.GetOpcode() == SMSG_GM_MESSAGECHAT)
+    {
+        WorldPacket p(packet);
+        p.rpos(0);
+        uint8 msgtype;
+        p >> msgtype;
+        // 如果收到私聊密语，立刻通电物理复苏
+        if (msgtype == CHAT_MSG_WHISPER)
+        {
+            if (sDormantBotMgr && sDormantBotMgr->IsDormant(bot->GetGUID()))
+                sDormantBotMgr->ForceWakeUp(bot);
+        }
+    }
+    else if (packet.GetOpcode() == SMSG_GROUP_INVITE) 
+    {
+        // 如果收到原生系统的组队邀请包，立刻通电物理复苏！
+        if (sDormantBotMgr && sDormantBotMgr->IsDormant(bot->GetGUID()))
+            sDormantBotMgr->ForceWakeUp(bot);
+    }
+    // ===================================
     if (!bot || !bot->IsInWorld() || bot->IsDuringRemoveFromWorld())
         return;
 

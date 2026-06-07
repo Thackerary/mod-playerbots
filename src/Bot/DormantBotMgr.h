@@ -10,6 +10,7 @@ struct DormantBotInfo
 {
     Player* botPlayer;
     uint32 mapId;
+    uint32 instanceId; 
     float posX;
     float posY;
     float posZ;
@@ -23,13 +24,13 @@ public:
 
     // 核心生命周期控制
     void Update(uint32 diff);
+	// 安全检查与白名单过滤
+    bool IsInWhitelist(Player* bot);
+	bool IsPlayerNearby(uint32 mapId, uint32 instanceId, float x, float y);
     void PutToSleep(Player* bot);
     void WakeUp(ObjectGuid guid, DormantBotInfo& info);
-
-    // 安全检查与白名单过滤
-    bool IsInWhitelist(Player* bot);
-    bool IsPlayerNearby(uint32 mapId, float x, float y);
-
+	void ForceWakeUp(Player* bot);
+	bool IsDormant(ObjectGuid guid) const { return DormantBotHolder.find(guid) != DormantBotHolder.end(); }
 private:
     DormantBotMgr() {}
     ~DormantBotMgr() {}
