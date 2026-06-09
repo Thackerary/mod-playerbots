@@ -1,5 +1,8 @@
 #include "DormantBotMgr.h"
+#include "Unit.h"		//Player.h的父类，需要加载
 #include "Player.h"    //必需引入此头文件
+#include "UnitDefines.h"  // 必须包含这个
+#include "SharedDefines.h"
 #include "Playerbots.h"           
 #include "RandomPlayerbotMgr.h"   
 #include "MapMgr.h"
@@ -8,7 +11,8 @@
 #include "GridNotifiers.h"
 #include "Group.h"                
 #include "WorldSession.h"          
-#include "ObjectAccessor.h"        
+#include "ObjectAccessor.h"       
+#include "Log.h" 
 
 DormantBotMgr* DormantBotMgr::instance()
 {
@@ -20,6 +24,9 @@ DormantBotMgr* DormantBotMgr::instance()
 bool DormantBotMgr::IsInWhitelist(Player* bot)
 {
     if (!bot) return true;
+	// 1. 飞行/交通工具豁免：只要在飞、在骑坐骑或在载具上，直接豁免休眠，防止穿帮和可能产生的未知的资源消耗
+    if (bot->IsFlying() || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) || bot->GetTransport())
+        return true;
 
     // 1. 随身工具人与队伍白名单：处于跟随或在真人队伍中，永久免除休眠
     if (Group* group = bot->GetGroup())
@@ -50,7 +57,7 @@ bool DormantBotMgr::IsInWhitelist(Player* bot)
 }
 
 // 用机器人扫描周围有没有真人
-bool DormantBotMgr::IsPlayerNearby(uint32 mapId, uint32 instanceId, float x, float y)
+bool DormantBotMgr::IsPlayerNearby(uint32 mapId, uint32 instanceId, float x, float y, float z)
 {
 	//使用 FindMap 精准定位具体的副本或大世界地图实例，包括副本和位面
     Map* currentMap = sMapMgr->FindMap(mapId, instanceId);
@@ -68,7 +75,20 @@ bool DormantBotMgr::IsPlayerNearby(uint32 mapId, uint32 instanceId, float x, flo
             // 只有当这个人【不是】Playerbot 时，才判定为“发现了真正的玩家”
             if (!sRandomPlayerbotMgr.GetPlayerBot(player->GetGUID()))
             {
-                // 采用 2D 辐射圈直接过滤，200码高移速缓冲区避坑
+				// 如果这个真人正在乘坐狮鹫/蝙蝠，不唤醒周围假人
+				if (player->HasUnitState(UNIT_STATE_IN_FLIGHT)) {
+					continue; 
+				}
+				//如果玩家正站在飞艇、船只或地铁上，不唤醒周围假人
+				if (player->GetTransport()) {
+					continue;
+				}
+				//屏蔽飞行坐骑，不唤醒机器人，25码高度飞行检测
+				if (player->IsFlying() && !player->IsFalling()) {
+					float zDiff = std::abs(z - player->GetPositionZ());
+					if (zDiff > 25.0f) continue;
+				}
+                // 采用 2D 辐射圈直接过滤，150码高移速缓冲区避坑
                 if (player->GetDistance2d(x, y) <= 150.0f)//150码检测距离已经接近产生穿帮现象的极限，安全距离为200码
                 {
                     return true; // 发现真正的人类，返回真
@@ -83,7 +103,15 @@ bool DormantBotMgr::IsPlayerNearby(uint32 mapId, uint32 instanceId, float x, flo
 void DormantBotMgr::PutToSleep(Player* bot)
 {
     if (!bot || !bot->IsInWorld() || IsInWhitelist(bot)) return;
-
+	// 清理任何bug产生的僵尸状态：如果它是“骑着空气”的僵尸，强制解绑后再休眠
+    if (bot->IsMounted() && !bot->GetTransport())
+    {
+        bot->Dismount();
+        bot->ClearUnitState(UNIT_STATE_IN_FLIGHT);
+        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot)) 
+            botAI->Reset(true);
+    }
+	
     Map* currentMap = bot->GetMap();
     if (!currentMap) return;
 
@@ -117,7 +145,6 @@ void DormantBotMgr::WakeUp(ObjectGuid guid, DormantBotInfo& info)
 
     Map* targetMap = sMapMgr->FindMap(info.mapId, info.instanceId);
     if (!targetMap) return;
-
 	//如果是由于被远程邀请拉进组触发的白名单强唤，直接跳过网格卡锁，防止因旧坐标没人导致永久死锁
 	if (!IsInWhitelist(bot))
     {
@@ -125,12 +152,17 @@ void DormantBotMgr::WakeUp(ObjectGuid guid, DormantBotInfo& info)
         if (!targetMap->IsGridLoaded(info.posX, info.posY))
             return; 
     }
+
     // 唤醒时锁死原始坐标，使用 GetSession() 恢复游戏网络状态
     bot->SetMap(targetMap);
     bot->Relocate(info.posX, info.posY, info.posZ, info.posO);
-    // 物理复活：重新推入 AC 核心网格刷新体系
-    targetMap->AddPlayerToMap(bot); 
-	
+
+	// 冗余保留代码，在调用 AddPlayerToMap 之前，可以额外确认一下 bot 是否还在
+	if (!bot->IsInWorld()) // 只有不在世界里才加，防止重复添加
+	{
+		targetMap->AddPlayerToMap(bot);// 物理复活：重新推入 AC 核心网格刷新体系
+	}
+
 	// === 【新增：强行打通 UI 渲染与队伍同步】 ===
     
 	//强行触发队伍 UI 同步
@@ -144,6 +176,10 @@ void DormantBotMgr::WakeUp(ObjectGuid guid, DormantBotInfo& info)
     {
         botAI->Reset(true); 
     }
+	// 冗余保留代码，物理状态重置，防止其唤醒时因各种未知bug摔死，省去复活步骤
+    bot->RemoveUnitMovementFlag(MOVEMENTFLAG_FALLING);
+	// 彻底停止之前的惯性，防止唤醒后在空中滑行
+    bot->StopMoving();
 	//前提是conf文件内AiPlayerbot.SummonWhenGroup = 1以开启组队比传送到身边，如果没设置，就需要手动召唤
     DormantBotHolder.erase(guid); // 从停尸房中移出
 }
@@ -168,7 +204,7 @@ void DormantBotMgr::Update(uint32 diff)
                 continue;
             if (bot->IsInWorld() && !IsInWhitelist(bot))
             {
-                if (!IsPlayerNearby(bot->GetMapId(), bot->GetInstanceId(), bot->GetPositionX(), bot->GetPositionY()))
+                if (!IsPlayerNearby(bot->GetMapId(), bot->GetInstanceId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
                     toSleep.push_back(bot);
             }
         }
@@ -181,21 +217,49 @@ void DormantBotMgr::Update(uint32 diff)
         {
             auto current = itr++;
 			Player* bot = current->second.botPlayer;
-			// 如果休眠的假人因为被远距离拉进队伍，触发了白名单豁免，原地唤醒！
+			ObjectGuid botGuid = current->first; //获取当前对象
+			// 如果休眠的假人因为被远距离拉进队伍，触发了白名单豁免，原地唤醒，一定要先做白名单判断
             if (bot && IsInWhitelist(bot))
             {
-                WakeUp(current->first, current->second);
+				m_pendingWakeups.erase(botGuid); //把阻尼计时也关掉
+                WakeUp(botGuid, current->second);
                 continue; // 成功唤醒，直接跳过下方的雷达距离检测
             }
-            if (IsPlayerNearby(current->second.mapId, current->second.instanceId, current->second.posX, current->second.posY))
+			//添加了2秒阻尼，来延迟苏醒
+            if (IsPlayerNearby(current->second.mapId, current->second.instanceId, current->second.posX, current->second.posY, current->second.posZ))
             {
-                WakeUp(current->first, current->second);
+				// 被扫面到后不立刻唤醒，进入延迟，以排除高速移动路过的玩家唤醒机器人
+                if (m_pendingWakeups.find(botGuid) == m_pendingWakeups.end())
+                {
+                    // 第一次发现，挂上 2000 毫秒（2秒）的阻尼倒计时
+                    m_pendingWakeups[botGuid] = 2000; 
+                }	
+				else if (m_pendingWakeups[botGuid] <= 1000)
+				//这里和m_scanTimer和diff有关，未来m_scanTimer值更改了，要相应更改
+                {	// 2秒钟过去了，真人还在雷达范围内，确认不是路过，执行物理唤醒
+                    WakeUp(botGuid, current->second);
+                    m_pendingWakeups.erase(botGuid);
+                }
+				else
+                    m_pendingWakeups[botGuid] -= 1000;
             }
+			else
+                {
+                    // 玩家离开了，清零计时器
+					m_pendingWakeups.erase(botGuid);
+                }
         }
     }
     else
     {
         m_scanTimer -= diff;
+    }
+	//10分钟扫描一次由未知原因产生错误的僵尸机器人
+	m_sanityCheckTimer += diff;
+    if (m_sanityCheckTimer >= 600000) // 600,000 毫秒 = 10分钟
+    {
+        SanityCheck();
+        m_sanityCheckTimer = 0; // 重置计时器
     }
 }
 void DormantBotMgr::ForceWakeUp(Player* bot)
@@ -209,5 +273,23 @@ void DormantBotMgr::ForceWakeUp(Player* bot)
     {
         // 调用类内部的唤醒函数
         WakeUp(it->first, it->second);
+    }
+}
+void DormantBotMgr::SanityCheck()
+{
+    // 日志记录：方便排查内存情况
+    //LOG_INFO("server.loading", "DormantBotMgr: Running SanityCheck. Current dormant bots: %zu", DormantBotHolder.size());
+
+    for (auto it = DormantBotHolder.begin(); it != DormantBotHolder.end(); )
+    {
+        // 逻辑：如果指针变空，或者玩家对象已经彻底销毁
+        if (!it->second.botPlayer)
+        {
+            it = DormantBotHolder.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
     }
 }
